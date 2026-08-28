@@ -6,7 +6,10 @@
     <application
         android:name=".RangIaApplication"
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="RangIA"
+        android:supportsRtl="true"
         android:theme="@style/Theme.RangIA"
         android:usesCleartextTraffic="false">
         <activity
