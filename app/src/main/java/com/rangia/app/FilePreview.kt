@@ -4,12 +4,13 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color as AndroidColor
+import android.graphics.pdf.PdfRenderer
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.ParcelFileDescriptor
-import android.graphics.pdf.PdfRenderer
 import java.io.File
 import java.io.FileInputStream
+import java.io.InputStream
 import kotlin.math.max
 
 object FilePreviewLoader {
@@ -27,7 +28,7 @@ object FilePreviewLoader {
         openStream(context, uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
         var sample = 1
         val maxSide = max(bounds.outWidth, bounds.outHeight)
-        while (maxSide / sample > targetPx * 2) sample *= 2
+        while (maxSide > 0 && maxSide / sample > targetPx * 2) sample *= 2
         val opts = BitmapFactory.Options().apply {
             inSampleSize = sample.coerceAtLeast(1)
             inPreferredConfig = Bitmap.Config.RGB_565
@@ -38,8 +39,10 @@ object FilePreviewLoader {
     private fun loadVideo(context: Context, uri: Uri): Bitmap? {
         val retriever = MediaMetadataRetriever()
         return try {
-            if (uri.scheme == "file") retriever.setDataSource(uri.path)
-            else retriever.setDataSource(context, uri)
+            if (uri.scheme == "file") {
+                val path = uri.path ?: return null
+                retriever.setDataSource(path)
+            } else retriever.setDataSource(context, uri)
             retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
         } finally {
             runCatching { retriever.release() }
@@ -64,13 +67,19 @@ object FilePreviewLoader {
         }
     }
 
-    private fun openStream(context: Context, uri: Uri) =
-        if (uri.scheme == "file") FileInputStream(File(uri.path ?: return null))
-        else context.contentResolver.openInputStream(uri)
+    private fun openStream(context: Context, uri: Uri): InputStream? {
+        return if (uri.scheme == "file") {
+            val path = uri.path ?: return null
+            val file = File(path)
+            if (!file.exists()) null else FileInputStream(file)
+        } else context.contentResolver.openInputStream(uri)
+    }
 
-    private fun openPfd(context: Context, uri: Uri): ParcelFileDescriptor? =
-        if (uri.scheme == "file") {
-            val file = File(uri.path ?: return null)
+    private fun openPfd(context: Context, uri: Uri): ParcelFileDescriptor? {
+        return if (uri.scheme == "file") {
+            val path = uri.path ?: return null
+            val file = File(path)
             if (!file.exists()) null else ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         } else context.contentResolver.openFileDescriptor(uri, "r")
+    }
 }
