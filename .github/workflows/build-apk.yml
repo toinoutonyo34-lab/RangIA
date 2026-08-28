@@ -21,6 +21,23 @@ jobs:
           unzip -q /tmp/rangia.zip -d /tmp/rangia-src
           test -f /tmp/rangia-src/RangIA/settings.gradle.kts
 
+      - name: Align Java and Kotlin JVM targets
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('/tmp/rangia-src/RangIA/app/build.gradle.kts')
+          s = p.read_text()
+          marker = '    buildFeatures {'
+          block = '''    compileOptions {
+              sourceCompatibility = JavaVersion.VERSION_17
+              targetCompatibility = JavaVersion.VERSION_17
+          }
+
+'''
+          if 'sourceCompatibility = JavaVersion.VERSION_17' not in s:
+              s = s.replace(marker, block + marker)
+          p.write_text(s)
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
