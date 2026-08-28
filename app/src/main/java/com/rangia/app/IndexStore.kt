@@ -44,6 +44,8 @@ class IndexStore(private val context: Context) {
         put("hash", hash)
         put("duplicate", duplicate)
         put("indexedAt", indexedAt)
+        put("classificationVersion", classificationVersion)
+        put("classificationEvidence", JSONArray().apply { classificationEvidence.forEach(::put) })
     }
 
     private fun JSONObject.toDoc() = IndexedDocument(
@@ -56,7 +58,7 @@ class IndexStore(private val context: Context) {
         size = optLong("size"),
         modifiedAt = optLong("modifiedAt"),
         extractedText = optString("extractedText"),
-        categoryPath = optString("categoryPath", "Autres"),
+        categoryPath = optString("categoryPath", "A_verifier/Documents"),
         confidence = optDouble("confidence", 0.0).toFloat(),
         suggestedName = optString("suggestedName", getString("originalName")),
         amount = if (isNull("amount")) null else optDouble("amount"),
@@ -64,6 +66,10 @@ class IndexStore(private val context: Context) {
         organization = if (isNull("organization")) null else optString("organization"),
         hash = optString("hash"),
         duplicate = optBoolean("duplicate"),
-        indexedAt = optLong("indexedAt")
+        indexedAt = optLong("indexedAt"),
+        classificationVersion = optInt("classificationVersion", 0),
+        classificationEvidence = optJSONArray("classificationEvidence")?.let { arr ->
+            buildList { for (i in 0 until arr.length()) add(arr.optString(i)) }
+        }.orEmpty()
     )
 }
