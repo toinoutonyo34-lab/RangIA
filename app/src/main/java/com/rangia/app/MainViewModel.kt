@@ -102,6 +102,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun organize(doc: IndexedDocument) {
+        if (_busy.value) return
         viewModelScope.launch {
             _busy.value = true
             try {
@@ -109,9 +110,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 organizer.organize(doc, tree)
                     .onSuccess {
                         _message.value = "Classé dans RangIA/${doc.categoryPath}"
-                        scanNowAfterOperation()
+                        rescanAfterOperation()
                     }
                     .onFailure { _message.value = "Classement impossible : ${it.message}" }
+            } finally { _busy.value = false }
+        }
+    }
+
+    fun moveToTrash(doc: IndexedDocument) {
+        if (_busy.value) return
+        viewModelScope.launch {
+            _busy.value = true
+            try {
+                val tree = prefs.treeUri?.let(Uri::parse)
+                organizer.moveToTrash(doc, tree)
+                    .onSuccess {
+                        _documents.value = _documents.value.filterNot { it.uri == doc.uri }
+                        withContext(Dispatchers.IO) { store.save(_documents.value) }
+                        _message.value = "${doc.originalName} a été déplacé dans la corbeille RangIA."
+                    }
+                    .onFailure { _message.value = "Impossible de mettre ce fichier à la corbeille : ${it.message}" }
+            } finally { _busy.value = false }
+        }
+    }
+
+    fun deletePermanently(doc: IndexedDocument) {
+        if (_busy.value) return
+        viewModelScope.launch {
+            _busy.value = true
+            try {
+                organizer.deletePermanently(doc)
+                    .onSuccess {
+                        _documents.value = _documents.value.filterNot { it.uri == doc.uri }
+                        withContext(Dispatchers.IO) { store.save(_documents.value) }
+                        _message.value = "Fichier supprimé définitivement."
+                    }
+                    .onFailure { _message.value = "Suppression impossible : ${it.message}" }
+            } finally { _busy.value = false }
+        }
+    }
+
+    fun emptyTrash() {
+        if (_busy.value) return
+        viewModelScope.launch {
+            _busy.value = true
+            try {
+                organizer.emptyTrash()
+                    .onSuccess { count -> _message.value = "$count fichier(s) supprimé(s) définitivement de la corbeille RangIA." }
+                    .onFailure { _message.value = "Impossible de vider la corbeille : ${it.message}" }
             } finally { _busy.value = false }
         }
     }
@@ -131,12 +177,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (doc.parentTreeUri == DocumentScanner.WHOLE_PHONE_MARKER || doc.contentUri.scheme == "file") {
                     val path = doc.contentUri.path ?: return@filter false
                     val f = File(path)
-                    organizer.isSafeUserFile(f) && !path.contains("/RangIA/")
+                    organizer.isSafeAutoOrganizeFile(f) && !path.contains("/RangIA/")
                 } else doc.relativePath != doc.categoryPath
             }
 
             if (candidates.isEmpty()) {
-                _message.value = "Aucun fichier sûr à déplacer automatiquement. Les fichiers d’applications restent seulement classés dans RangIA pour éviter de casser WhatsApp, la galerie ou Android."
+                _message.value = "Aucun fichier suffisamment sûr à déplacer automatiquement. Les autres restent classés virtuellement dans RangIA."
                 _busy.value = false
                 return@launch
             }
@@ -149,7 +195,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _progress.value = "Rangement ${index + 1}/${candidates.size} · ${doc.originalName}"
                     organizer.organize(doc, tree).onSuccess { moved++ }.onFailure { failed++ }
                 }
-                scanNowAfterOperation()
+                rescanAfterOperation()
                 _message.value = "$moved fichier(s) déplacé(s) dans le dossier RangIA" + if (failed > 0) ", $failed non déplacé(s)." else "."
             } finally {
                 _progress.value = ""
@@ -158,7 +204,64 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun scanNowAfterOperation() {
+    /**
+     * Nettoyage prudent des doublons exacts SHA-256.
+     * Pour chaque groupe, RangIA ne met à la corbeille que les fichiers qu'elle peut modifier sans
+     * toucher aux zones privées d'autres applications, et conserve toujours au moins une copie
+     * dans un emplacement utilisateur modifiable.
+     */
+    fun cleanupDuplicates() {
+        if (_busy.value) return
+        val duplicateGroups = _documents.value
+            .filter { it.hash.isNotBlank() }
+            .groupBy { it.hash }
+            .values
+            .filter { it.size > 1 }
+
+        val removable = duplicateGroups.flatMap { group ->
+            val modifiable = group.filter(organizer::canModify)
+            if (modifiable.size <= 1) emptyList()
+            else {
+                val keeper = modifiable.minWithOrNull(
+                    compareBy<IndexedDocument>(
+                        { if (it.relativePath.contains("RangIA", ignoreCase = true)) 0 else 1 },
+                        { if (it.relativePath.contains("Documents", ignoreCase = true)) 0 else 1 },
+                        { -it.modifiedAt }
+                    )
+                )
+                modifiable.filterNot { it.uri == keeper?.uri }
+            }
+        }.distinctBy { it.uri }
+
+        if (removable.isEmpty()) {
+            _message.value = "Aucun doublon ne peut être nettoyé automatiquement sans risque."
+            return
+        }
+
+        viewModelScope.launch {
+            _busy.value = true
+            val tree = prefs.treeUri?.let(Uri::parse)
+            var moved = 0
+            var failed = 0
+            var bytes = 0L
+            try {
+                removable.forEachIndexed { index, doc ->
+                    _progress.value = "Doublons ${index + 1}/${removable.size} · ${doc.originalName}"
+                    organizer.moveToTrash(doc, tree)
+                        .onSuccess { moved++; bytes += doc.size }
+                        .onFailure { failed++ }
+                }
+                rescanAfterOperation()
+                _message.value = "$moved doublon(s) déplacé(s) dans la corbeille · ${formatBytes(bytes)} récupérables" +
+                    if (failed > 0) " · $failed ignoré(s)." else "."
+            } finally {
+                _progress.value = ""
+                _busy.value = false
+            }
+        }
+    }
+
+    private suspend fun rescanAfterOperation() {
         val updated = if (prefs.wholePhoneMode && _allFilesAccess.value) scanner.scanWholePhone(_documents.value)
         else {
             val raw = prefs.treeUri ?: return
@@ -171,7 +274,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val learnedExamplesCount: Int get() = classifier.learnedExamplesCount()
     val aiCategories: List<String> get() = (LocalAiEngine.categories + listOf(
         "Documents/PDF", "Documents/Texte", "Documents/Word", "Documents/Tableurs", "Documents/Présentations",
-        "Photos", "Vidéos", "Audio", "Archives", "Applications_APK", "Livres", "Polices", "Fichiers/Autres"
+        "Photos/Captures_ecran", "Photos/Appareil_photo", "Photos/Messageries", "Photos/Autres",
+        "Vidéos/Appareil_photo", "Vidéos/Messageries", "Vidéos/Autres",
+        "Audio/Messages_vocaux", "Audio/Musique", "Audio/Autres",
+        "Archives", "Applications_APK", "Livres", "Polices", "Fichiers/Autres"
     )).distinct()
 
     fun correctCategory(doc: IndexedDocument, category: String) {
@@ -195,4 +301,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun dismissMessage() { _message.value = null }
+
+    private fun formatBytes(bytes: Long): String {
+        if (bytes < 1024) return "$bytes o"
+        val kb = bytes / 1024.0
+        if (kb < 1024) return "%.1f Ko".format(kb)
+        val mb = kb / 1024.0
+        if (mb < 1024) return "%.1f Mo".format(mb)
+        return "%.2f Go".format(mb / 1024.0)
+    }
 }
