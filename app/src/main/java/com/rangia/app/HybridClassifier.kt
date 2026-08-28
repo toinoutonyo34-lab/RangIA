@@ -6,6 +6,10 @@ class HybridClassifier(context: Context) {
     private val training = AiTrainingStore(context)
 
     fun classify(fileName: String, text: String): ClassificationResult {
+        SmartCategoryRefiner.refine(fileName, text)?.let { refined ->
+            if (refined.confidence >= 0.90f) return refined
+        }
+
         val ai = LocalAiEngine(training.load()).predict(fileName, text)
         val rules = DocumentIntelligence.ruleClassify(fileName, text)
         if (rules.confidence >= 0.86f) {
