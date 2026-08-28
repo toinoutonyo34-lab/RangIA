@@ -22,7 +22,7 @@ class DocumentScanner(private val context: Context) {
     ): List<IndexedDocument> {
         val root = DocumentFile.fromTreeUri(context, treeUri) ?: return existing
         val files = withContext(Dispatchers.IO) { collectFiles(root) }
-            .filter { isDeepAnalyzable(it.file.name.orEmpty(), it.file.type.orEmpty()) }
+            .filter { isIndexableInTree(it.file.name.orEmpty(), it.file.type.orEmpty()) }
         val existingByUri = existing.associateBy { it.uri }.toMutableMap()
 
         for ((index, scanned) in files.withIndex()) {
@@ -31,13 +31,18 @@ class DocumentScanner(private val context: Context) {
             val previous = existingByUri[uriString]
             val name = file.name ?: "document"
             onProgress(index + 1, files.size, name)
-            if (previous != null && previous.modifiedAt == file.lastModified() && previous.size == file.length()) continue
+            if (previous != null &&
+                previous.modifiedAt == file.lastModified() &&
+                previous.size == file.length() &&
+                previous.classificationVersion == HybridClassifier.MODEL_VERSION
+            ) continue
 
             val mime = file.type ?: guessMime(name)
-            val text = runCatching { ocr.extract(file.uri, mime) }.getOrDefault("")
-            val classification = classify(name, mime, text, scanned.relativePath)
-            val entities = DocumentIntelligence.extractEntities(text)
+            val text = if (isSemanticDocument(name, mime)) runCatching { ocr.extract(file.uri, mime) }.getOrDefault("") else ""
+            val classification = classifyProfessional(name, mime, text, scanned.relativePath)
+            val entities = if (text.isNotBlank()) DocumentIntelligence.extractEntities(text) else ExtractedEntities()
             val hash = runCatching { organizer.sha256(file.uri) }.getOrDefault("")
+            val suggested = suggestedName(name, mime, classification, entities)
 
             existingByUri[uriString] = IndexedDocument(
                 uri = uriString,
@@ -51,12 +56,14 @@ class DocumentScanner(private val context: Context) {
                 extractedText = text.take(120_000),
                 categoryPath = classification.categoryPath,
                 confidence = classification.confidence,
-                suggestedName = DocumentIntelligence.suggestFileName(name, classification.categoryPath, entities),
+                suggestedName = suggested,
                 amount = entities.amount,
                 detectedDate = entities.date,
                 organization = entities.organization,
                 hash = hash,
-                duplicate = false
+                duplicate = false,
+                classificationVersion = HybridClassifier.MODEL_VERSION,
+                classificationEvidence = classification.matchedKeywords
             )
         }
 
@@ -80,23 +87,28 @@ class DocumentScanner(private val context: Context) {
         for ((index, file) in files.withIndex()) {
             val uri = Uri.fromFile(file)
             val uriString = uri.toString()
-            val relative = runCatching { file.relativeTo(root).path }.getOrDefault(file.name)
+            val relative = runCatching { file.relativeTo(root).invariantSeparatorsPath }.getOrDefault(file.name)
             val parentRelative = relative.substringBeforeLast('/', "")
             val previous = existingByUri[uriString]
             onProgress(index + 1, files.size, relative)
-            if (previous != null && previous.modifiedAt == file.lastModified() && previous.size == file.length()) continue
+
+            if (previous != null &&
+                previous.modifiedAt == file.lastModified() &&
+                previous.size == file.length() &&
+                previous.classificationVersion == HybridClassifier.MODEL_VERSION
+            ) continue
 
             val mime = guessMime(file.name)
-            val deep = isDeepAnalyzable(file.name, mime) && shouldDeepAnalyze(file, relative)
-            val text = if (deep) runCatching { ocr.extract(uri, mime) }.getOrDefault("") else ""
-            val classification = classify(file.name, mime, text, parentRelative)
+            val canDeepAnalyze = isSemanticDocument(file.name, mime) && shouldDeepAnalyze(file, relative)
+            val text = if (canDeepAnalyze) runCatching { ocr.extract(uri, mime) }.getOrDefault("") else ""
+            val classification = if (canDeepAnalyze || mime == "application/pdf") {
+                classifyProfessional(file.name, mime, text, parentRelative)
+            } else {
+                ClassificationResult(categoryFromType(file.name, mime, parentRelative), 0.99f, listOf("type de fichier"))
+            }
             val entities = if (text.isNotBlank()) DocumentIntelligence.extractEntities(text) else ExtractedEntities()
             val hash = if (file.length() in 1..MAX_HASH_BYTES) runCatching { organizer.sha256(uri) }.getOrDefault("") else ""
-
-            val suggested = if (classification.categoryPath.startsWith("Fichiers/") || classification.categoryPath.startsWith("Photos/") ||
-                classification.categoryPath.startsWith("Vidéos/") || classification.categoryPath.startsWith("Audio/") ||
-                classification.categoryPath in TYPE_ONLY_CATEGORIES
-            ) sanitizeOriginalName(file.name) else DocumentIntelligence.suggestFileName(file.name, classification.categoryPath, entities)
+            val suggested = suggestedName(file.name, mime, classification, entities)
 
             existingByUri[uriString] = IndexedDocument(
                 uri = uriString,
@@ -115,7 +127,9 @@ class DocumentScanner(private val context: Context) {
                 detectedDate = entities.date,
                 organization = entities.organization,
                 hash = hash,
-                duplicate = false
+                duplicate = false,
+                classificationVersion = HybridClassifier.MODEL_VERSION,
+                classificationEvidence = classification.matchedKeywords
             )
         }
 
@@ -123,6 +137,39 @@ class DocumentScanner(private val context: Context) {
         val nonPhoneEntries = existing.filter { it.parentTreeUri != marker }
         val phoneEntries = existingByUri.values.filter { it.parentTreeUri == marker && it.uri in live }
         markDuplicates((nonPhoneEntries + phoneEntries).distinctBy { it.uri })
+    }
+
+    private fun classifyProfessional(name: String, mime: String, text: String, relativePath: String): ClassificationResult {
+        // Binary/media/archive types must never be guessed by the document AI.
+        if (!isSemanticDocument(name, mime)) {
+            return ClassificationResult(categoryFromType(name, mime, relativePath), 0.99f, listOf("type de fichier"))
+        }
+
+        if (mime == "application/pdf" && text.isBlank()) {
+            return ClassificationResult("A_verifier/Documents", 0.30f, listOf("PDF sans texte exploitable"))
+        }
+
+        val result = classifier.classify(name, text)
+        if (result.categoryPath == "A_verifier/Documents" && mime.startsWith("image/")) {
+            return ClassificationResult(categoryFromType(name, mime, relativePath), 0.82f, listOf("image sans signature documentaire fiable"))
+        }
+        return result
+    }
+
+    private fun suggestedName(
+        originalName: String,
+        mime: String,
+        classification: ClassificationResult,
+        entities: ExtractedEntities
+    ): String {
+        if (classification.categoryPath.startsWith("A_verifier/")) return sanitizeOriginalName(originalName)
+        if (classification.categoryPath.startsWith("Fichiers/") ||
+            classification.categoryPath.startsWith("Photos/") ||
+            classification.categoryPath.startsWith("Vidéos/") ||
+            classification.categoryPath.startsWith("Audio/") ||
+            classification.categoryPath in TYPE_ONLY_CATEGORIES
+        ) return sanitizeOriginalName(originalName)
+        return DocumentIntelligence.suggestFileName(originalName, classification.categoryPath, entities)
     }
 
     private fun collectWholePhoneFiles(root: File): List<File> {
@@ -157,13 +204,10 @@ class DocumentScanner(private val context: Context) {
         if (mime == "application/pdf" || mime.startsWith("text/")) return true
         if (!mime.startsWith("image/")) return false
         val p = relative.lowercase(Locale.ROOT)
-        return listOf("download", "document", "scan", "screenshot", "whatsapp/documents", "telegram/documents", "bluetooth").any { it in p }
-    }
-
-    private fun classify(name: String, mime: String, text: String, relativePath: String): ClassificationResult {
-        val ai = classifier.classify(name, text)
-        if (ai.categoryPath != "Autres" || text.isNotBlank()) return ai
-        return ClassificationResult(categoryFromType(name, mime, relativePath), 0.94f, listOf("type et emplacement du fichier"))
+        return listOf(
+            "download", "document", "scan", "screenshot", "whatsapp/documents", "telegram/documents",
+            "bluetooth", "received", "administratif", "facture", "papier"
+        ).any { it in p }
     }
 
     private fun categoryFromType(name: String, mime: String, relativePath: String): String {
@@ -183,7 +227,7 @@ class DocumentScanner(private val context: Context) {
             mime.startsWith("audio/") && ("music" in p || "musique" in p) -> "Audio/Musique"
             mime.startsWith("audio/") -> "Audio/Autres"
 
-            mime == "application/pdf" -> "Documents/PDF"
+            mime == "application/pdf" -> "A_verifier/Documents"
             mime.startsWith("text/") -> "Documents/Texte"
             ext in setOf("doc", "docx", "odt", "rtf") -> "Documents/Word"
             ext in setOf("xls", "xlsx", "ods", "csv") -> "Documents/Tableurs"
@@ -216,10 +260,18 @@ class DocumentScanner(private val context: Context) {
         return out
     }
 
-    private fun isDeepAnalyzable(name: String, type: String): Boolean {
+    private fun isIndexableInTree(name: String, type: String): Boolean {
+        val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        return isSemanticDocument(name, type) ||
+            type.startsWith("video/") || type.startsWith("audio/") ||
+            ext in setOf("doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "csv", "ppt", "pptx", "odp", "zip", "rar", "7z", "apk")
+    }
+
+    private fun isSemanticDocument(name: String, type: String): Boolean {
         val lower = name.lowercase(Locale.ROOT)
         return type == "application/pdf" || type.startsWith("image/") || type.startsWith("text/") ||
-            lower.endsWith(".pdf") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".webp") || lower.endsWith(".txt")
+            lower.endsWith(".pdf") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") ||
+            lower.endsWith(".webp") || lower.endsWith(".txt")
     }
 
     private fun guessMime(name: String): String {
