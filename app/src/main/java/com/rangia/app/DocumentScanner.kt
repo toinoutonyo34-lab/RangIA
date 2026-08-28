@@ -8,6 +8,7 @@ import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 
 class DocumentScanner(private val context: Context) {
     private val ocr = OcrEngine(context)
@@ -34,7 +35,7 @@ class DocumentScanner(private val context: Context) {
 
             val mime = file.type ?: guessMime(name)
             val text = runCatching { ocr.extract(file.uri, mime) }.getOrDefault("")
-            val classification = classify(name, mime, text)
+            val classification = classify(name, mime, text, scanned.relativePath)
             val entities = DocumentIntelligence.extractEntities(text)
             val hash = runCatching { organizer.sha256(file.uri) }.getOrDefault("")
 
@@ -88,13 +89,14 @@ class DocumentScanner(private val context: Context) {
             val mime = guessMime(file.name)
             val deep = isDeepAnalyzable(file.name, mime) && shouldDeepAnalyze(file, relative)
             val text = if (deep) runCatching { ocr.extract(uri, mime) }.getOrDefault("") else ""
-            val classification = classify(file.name, mime, text)
+            val classification = classify(file.name, mime, text, parentRelative)
             val entities = if (text.isNotBlank()) DocumentIntelligence.extractEntities(text) else ExtractedEntities()
             val hash = if (file.length() in 1..MAX_HASH_BYTES) runCatching { organizer.sha256(uri) }.getOrDefault("") else ""
 
-            val suggested = if (classification.categoryPath.startsWith("Fichiers/") || classification.categoryPath in TYPE_ONLY_CATEGORIES) {
-                sanitizeOriginalName(file.name)
-            } else DocumentIntelligence.suggestFileName(file.name, classification.categoryPath, entities)
+            val suggested = if (classification.categoryPath.startsWith("Fichiers/") || classification.categoryPath.startsWith("Photos/") ||
+                classification.categoryPath.startsWith("Vidéos/") || classification.categoryPath.startsWith("Audio/") ||
+                classification.categoryPath in TYPE_ONLY_CATEGORIES
+            ) sanitizeOriginalName(file.name) else DocumentIntelligence.suggestFileName(file.name, classification.categoryPath, entities)
 
             existingByUri[uriString] = IndexedDocument(
                 uri = uriString,
@@ -141,9 +143,11 @@ class DocumentScanner(private val context: Context) {
 
     private fun shouldSkipDirectory(root: File, dir: File): Boolean {
         val rel = runCatching { dir.relativeTo(root).invariantSeparatorsPath }.getOrDefault("")
-        if (rel == "Android/data" || rel.startsWith("Android/data/")) return true
-        if (rel == "Android/obb" || rel.startsWith("Android/obb/")) return true
-        if (rel.startsWith(".Trash") || rel.startsWith(".thumbnails")) return true
+        val lower = rel.lowercase(Locale.ROOT)
+        if (lower == "android/data" || lower.startsWith("android/data/")) return true
+        if (lower == "android/obb" || lower.startsWith("android/obb/")) return true
+        if (lower == "rangia/corbeille" || lower.startsWith("rangia/corbeille/")) return true
+        if (lower.startsWith(".trash") || lower.startsWith(".thumbnails")) return true
         return false
     }
 
@@ -152,22 +156,33 @@ class DocumentScanner(private val context: Context) {
         val mime = guessMime(file.name)
         if (mime == "application/pdf" || mime.startsWith("text/")) return true
         if (!mime.startsWith("image/")) return false
-        val p = relative.lowercase()
+        val p = relative.lowercase(Locale.ROOT)
         return listOf("download", "document", "scan", "screenshot", "whatsapp/documents", "telegram/documents", "bluetooth").any { it in p }
     }
 
-    private fun classify(name: String, mime: String, text: String): ClassificationResult {
+    private fun classify(name: String, mime: String, text: String, relativePath: String): ClassificationResult {
         val ai = classifier.classify(name, text)
         if (ai.categoryPath != "Autres" || text.isNotBlank()) return ai
-        return ClassificationResult(categoryFromType(name, mime), 0.94f, listOf("type de fichier"))
+        return ClassificationResult(categoryFromType(name, mime, relativePath), 0.94f, listOf("type et emplacement du fichier"))
     }
 
-    private fun categoryFromType(name: String, mime: String): String {
-        val ext = name.substringAfterLast('.', "").lowercase()
+    private fun categoryFromType(name: String, mime: String, relativePath: String): String {
+        val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        val p = relativePath.lowercase(Locale.ROOT)
         return when {
-            mime.startsWith("image/") -> "Photos"
-            mime.startsWith("video/") -> "Vidéos"
-            mime.startsWith("audio/") -> "Audio"
+            mime.startsWith("image/") && ("screenshot" in p || "screenshots" in p || "capture" in name.lowercase(Locale.ROOT)) -> "Photos/Captures_ecran"
+            mime.startsWith("image/") && ("dcim" in p || "camera" in p) -> "Photos/Appareil_photo"
+            mime.startsWith("image/") && ("whatsapp" in p || "telegram" in p || "messenger" in p) -> "Photos/Messageries"
+            mime.startsWith("image/") -> "Photos/Autres"
+
+            mime.startsWith("video/") && ("dcim" in p || "camera" in p) -> "Vidéos/Appareil_photo"
+            mime.startsWith("video/") && ("whatsapp" in p || "telegram" in p || "messenger" in p) -> "Vidéos/Messageries"
+            mime.startsWith("video/") -> "Vidéos/Autres"
+
+            mime.startsWith("audio/") && ("voice" in p || "ptt" in p || "whatsapp" in p) -> "Audio/Messages_vocaux"
+            mime.startsWith("audio/") && ("music" in p || "musique" in p) -> "Audio/Musique"
+            mime.startsWith("audio/") -> "Audio/Autres"
+
             mime == "application/pdf" -> "Documents/PDF"
             mime.startsWith("text/") -> "Documents/Texte"
             ext in setOf("doc", "docx", "odt", "rtf") -> "Documents/Word"
@@ -191,7 +206,9 @@ class DocumentScanner(private val context: Context) {
             val (current, currentPath) = stack.removeLast()
             current.listFiles().forEach { child ->
                 if (child.isDirectory) {
-                    val childPath = listOf(currentPath, child.name.orEmpty()).filter { it.isNotBlank() }.joinToString("/")
+                    val name = child.name.orEmpty()
+                    if (name.equals("RangIA_Corbeille", true) || name.equals("Corbeille", true)) return@forEach
+                    val childPath = listOf(currentPath, name).filter { it.isNotBlank() }.joinToString("/")
                     stack.add(child to childPath)
                 } else if (child.isFile) out += ScannedFile(child, currentPath)
             }
@@ -200,13 +217,13 @@ class DocumentScanner(private val context: Context) {
     }
 
     private fun isDeepAnalyzable(name: String, type: String): Boolean {
-        val lower = name.lowercase()
+        val lower = name.lowercase(Locale.ROOT)
         return type == "application/pdf" || type.startsWith("image/") || type.startsWith("text/") ||
             lower.endsWith(".pdf") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".webp") || lower.endsWith(".txt")
     }
 
     private fun guessMime(name: String): String {
-        val ext = name.substringAfterLast('.', "").lowercase()
+        val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
         return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: when (ext) {
             "pdf" -> "application/pdf"
             "jpg", "jpeg" -> "image/jpeg"
@@ -230,6 +247,6 @@ class DocumentScanner(private val context: Context) {
         const val WHOLE_PHONE_MARKER = "phone://shared-storage"
         private const val MAX_OCR_BYTES = 80L * 1024 * 1024
         private const val MAX_HASH_BYTES = 256L * 1024 * 1024
-        private val TYPE_ONLY_CATEGORIES = setOf("Photos", "Vidéos", "Audio", "Archives", "Applications_APK", "Livres", "Polices")
+        private val TYPE_ONLY_CATEGORIES = setOf("Archives", "Applications_APK", "Livres", "Polices")
     }
 }
