@@ -13,7 +13,7 @@
         android:theme="@style/Theme.RangIA"
         android:usesCleartextTraffic="false">
         <activity
-            android:name=".RangIaV1Activity"
+            android:name=".MainActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
