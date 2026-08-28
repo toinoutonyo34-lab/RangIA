@@ -87,8 +87,12 @@ class FileOrganizer(private val context: Context) {
     private fun canUserModify(file: File): Boolean {
         val rel = relativePath(file)
         if (rel.isBlank() || isProtectedPath(rel)) return false
-        if (rel.startsWith("RangIA/Corbeille/")) return true
-        val top = rel.substringBefore('/').lowercase(Locale.ROOT)
+        val p = rel.lowercase(Locale.ROOT)
+        if (p.startsWith("rangia/corbeille/")) return true
+        if (p == "android/media" || p.startsWith("android/media/")) return true
+        if (p == "telegram" || p.startsWith("telegram/")) return true
+        if (p == "whatsapp" || p.startsWith("whatsapp/")) return true
+        val top = p.substringBefore('/')
         return top in USER_MANAGED_TOP_LEVEL_DIRS
     }
 
@@ -107,7 +111,7 @@ class FileOrganizer(private val context: Context) {
         val source = File(doc.contentUri.path ?: error("Chemin source invalide"))
         require(source.exists() && source.isFile) { "Fichier source inaccessible" }
         require(canUserModify(source) && !isInRangIaTrash(source)) {
-            "RangIA ne peut pas mettre automatiquement ce fichier à la corbeille depuis un dossier protégé."
+            "RangIA ne peut pas mettre ce fichier à la corbeille depuis cet emplacement protégé."
         }
         val day = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(Date())
         val targetDir = File(trashRoot(), day)
@@ -208,11 +212,12 @@ class FileOrganizer(private val context: Context) {
 
     private fun isProtectedPath(rel: String): Boolean {
         val p = rel.lowercase(Locale.ROOT)
-        return p == "android" || p.startsWith("android/") || p == "telegram" || p.startsWith("telegram/") ||
+        return p == "android/data" || p.startsWith("android/data/") ||
+            p == "android/obb" || p.startsWith("android/obb/") ||
             p.startsWith(".trash") || p.startsWith(".thumbnails")
     }
 
-    private fun isInRangIaTrash(file: File): Boolean = relativePath(file).startsWith("RangIA/Corbeille/")
+    private fun isInRangIaTrash(file: File): Boolean = relativePath(file).lowercase(Locale.ROOT).startsWith("rangia/corbeille/")
 
     private fun rangIaRoot(): File = File(Environment.getExternalStorageDirectory(), "RangIA")
     private fun trashRoot(): File = File(rangIaRoot(), "Corbeille")
@@ -230,7 +235,7 @@ class FileOrganizer(private val context: Context) {
         )
 
         private val USER_MANAGED_TOP_LEVEL_DIRS = SAFE_AUTO_TOP_LEVEL_DIRS + setOf(
-            "dcim", "pictures", "movies", "music", "podcasts", "ringtones", "alarms", "notifications", "rangia"
+            "dcim", "pictures", "movies", "music", "podcasts", "ringtones", "alarms", "notifications", "rangia", "whatsapp", "telegram"
         )
     }
 }
