@@ -6,14 +6,14 @@ plugins {
 
 android {
     namespace = "com.rangia.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.rangia.app"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        targetSdk = 36
+        versionCode = 10
+        versionName = "1.0.0"
     }
 
     compileOptions {
@@ -24,6 +24,12 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+        }
     }
 
     packaging {
@@ -45,4 +51,5 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.android.billingclient:billing-ktx:9.1.0")
 }
