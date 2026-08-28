@@ -20,9 +20,12 @@ data class IndexedDocument(
     val organization: String?,
     val hash: String,
     val duplicate: Boolean,
-    val indexedAt: Long = System.currentTimeMillis()
+    val indexedAt: Long = System.currentTimeMillis(),
+    val classificationVersion: Int = 0,
+    val classificationEvidence: List<String> = emptyList()
 ) {
     val contentUri: Uri get() = Uri.parse(uri)
+    val needsReview: Boolean get() = categoryPath.startsWith("A_verifier/") || confidence < 0.72f
 }
 
 data class ClassificationResult(
