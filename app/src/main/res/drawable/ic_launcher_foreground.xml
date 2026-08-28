@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="@color/rangia_launcher_purple"
+        android:pathData="M18,31 L42,31 L50,39 L88,39 Q94,39 94,45 L94,76 Q94,83 87,83 L22,83 Q15,83 15,76 L15,38 Q15,31 22,31 Z" />
+
+    <path
+        android:fillColor="@color/rangia_launcher_blue"
+        android:pathData="M27,44 L82,44 Q89,44 89,51 L89,81 Q89,88 82,88 L27,88 Q20,88 20,81 L20,51 Q20,44 27,44 Z" />
+
+    <path
+        android:fillColor="@color/rangia_launcher_cyan"
+        android:fillAlpha="0.95"
+        android:pathData="M74,48 L89,53 L89,79 L81,88 L74,84 Z" />
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M35,57 L70,57 Q73,57 73,60 Q73,63 70,63 L35,63 Q32,63 32,60 Q32,57 35,57 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M35,68 L64,68 Q67,68 67,71 Q67,74 64,74 L35,74 Q32,74 32,71 Q32,68 35,68 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M35,79 L56,79 Q59,79 59,82 Q59,85 56,85 L35,85 Q32,85 32,82 Q32,79 35,79 Z" />
+
+    <path
+        android:fillColor="#FFB4A8FF"
+        android:pathData="M82,18 L85,26 L93,29 L85,32 L82,40 L79,32 L71,29 L79,26 Z" />
+</vector>
