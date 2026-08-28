@@ -1,6 +1,7 @@
 package com.rangia.app
 
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Environment
 import androidx.documentfile.provider.DocumentFile
@@ -8,6 +9,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class FileOrganizer(private val context: Context) {
     suspend fun sha256(uri: Uri): String = withContext(Dispatchers.IO) {
@@ -31,38 +35,116 @@ class FileOrganizer(private val context: Context) {
         }
     }
 
+    suspend fun moveToTrash(doc: IndexedDocument, rootTreeUri: Uri? = null): Result<Uri> = withContext(Dispatchers.IO) {
+        if (doc.parentTreeUri == DocumentScanner.WHOLE_PHONE_MARKER || doc.contentUri.scheme == "file") trashDirect(doc)
+        else {
+            val tree = rootTreeUri ?: return@withContext Result.failure(IllegalStateException("Dossier racine manquant"))
+            trashSaf(doc, tree)
+        }
+    }
+
+    suspend fun deletePermanently(doc: IndexedDocument): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            if (doc.contentUri.scheme == "file" || doc.parentTreeUri == DocumentScanner.WHOLE_PHONE_MARKER) {
+                val file = File(doc.contentUri.path ?: error("Chemin invalide"))
+                require(canUserModify(file) || isInRangIaTrash(file)) { "Suppression refusée pour ce dossier protégé." }
+                if (file.exists() && !file.delete()) error("Impossible de supprimer le fichier")
+                notifyMediaChanged(file.path)
+            } else {
+                val source = DocumentFile.fromSingleUri(context, doc.contentUri) ?: error("Fichier inaccessible")
+                if (source.exists() && !source.delete()) error("Impossible de supprimer le fichier")
+            }
+        }
+    }
+
+    suspend fun emptyTrash(): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            val trash = trashRoot()
+            if (!trash.exists()) return@runCatching 0
+            val files = trash.walkBottomUp().filter { it.isFile }.toList()
+            var deleted = 0
+            files.forEach { f -> if (f.delete()) deleted++ }
+            trash.walkBottomUp().filter { it.isDirectory && it != trash }.forEach { it.delete() }
+            notifyMediaChanged(trash.path)
+            deleted
+        }
+    }
+
+    fun canModify(doc: IndexedDocument): Boolean {
+        if (doc.contentUri.scheme != "file" && doc.parentTreeUri != DocumentScanner.WHOLE_PHONE_MARKER) return true
+        val file = File(doc.contentUri.path ?: return false)
+        return canUserModify(file) || isInRangIaTrash(file)
+    }
+
+    fun isSafeAutoOrganizeFile(file: File): Boolean {
+        val rel = relativePath(file)
+        if (rel.isBlank() || rel.startsWith("RangIA/") || isProtectedPath(rel)) return false
+        return rel.substringBefore('/').lowercase(Locale.ROOT) in SAFE_AUTO_TOP_LEVEL_DIRS
+    }
+
+    fun isSafeUserFile(file: File): Boolean = isSafeAutoOrganizeFile(file)
+
+    private fun canUserModify(file: File): Boolean {
+        val rel = relativePath(file)
+        if (rel.isBlank() || isProtectedPath(rel)) return false
+        if (rel.startsWith("RangIA/Corbeille/")) return true
+        val top = rel.substringBefore('/').lowercase(Locale.ROOT)
+        return top in USER_MANAGED_TOP_LEVEL_DIRS
+    }
+
     private fun organizeDirect(doc: IndexedDocument): Result<Uri> = runCatching {
         val source = File(doc.contentUri.path ?: error("Chemin source invalide"))
         require(source.exists() && source.isFile) { "Fichier source inaccessible" }
-        require(isSafeUserFile(source)) { "Ce fichier appartient à un dossier géré par une autre application ; RangIA le classe virtuellement mais ne le déplace pas automatiquement." }
+        require(isSafeAutoOrganizeFile(source)) {
+            "Ce fichier est classé dans RangIA mais son emplacement n’est pas déplacé automatiquement pour éviter de perturber une autre application."
+        }
 
-        val sharedRoot = Environment.getExternalStorageDirectory()
-        val targetDir = File(File(sharedRoot, "RangIA"), sanitizePath(doc.categoryPath))
+        val targetDir = File(rangIaRoot(), sanitizePath(doc.categoryPath))
+        copyThenDelete(source, targetDir, doc.suggestedName.ifBlank { doc.originalName })
+    }
+
+    private fun trashDirect(doc: IndexedDocument): Result<Uri> = runCatching {
+        val source = File(doc.contentUri.path ?: error("Chemin source invalide"))
+        require(source.exists() && source.isFile) { "Fichier source inaccessible" }
+        require(canUserModify(source) && !isInRangIaTrash(source)) {
+            "RangIA ne peut pas mettre automatiquement ce fichier à la corbeille depuis un dossier protégé."
+        }
+        val day = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(Date())
+        val targetDir = File(trashRoot(), day)
+        copyThenDelete(source, targetDir, source.name)
+    }
+
+    private fun copyThenDelete(source: File, targetDir: File, desiredName: String): Uri {
         if (!targetDir.exists() && !targetDir.mkdirs()) error("Impossible de créer ${targetDir.path}")
-        val target = uniqueFile(targetDir, doc.suggestedName.ifBlank { doc.originalName })
-
+        val target = uniqueFile(targetDir, desiredName)
         source.inputStream().use { input -> target.outputStream().use { output -> input.copyTo(output); output.flush() } }
         if (source.length() > 0 && target.length() != source.length()) {
             target.delete(); error("Vérification de copie échouée")
         }
+        val oldPath = source.path
         if (!source.delete()) {
             target.delete(); error("Copie créée mais suppression de l'original impossible")
         }
-        Uri.fromFile(target)
-    }
-
-    fun isSafeUserFile(file: File): Boolean {
-        val root = Environment.getExternalStorageDirectory()
-        val rel = runCatching { file.relativeTo(root).invariantSeparatorsPath }.getOrDefault("")
-        if (rel.isBlank() || rel.startsWith("RangIA/") || rel.startsWith("Android/")) return false
-        return rel.substringBefore('/').lowercase() in SAFE_TOP_LEVEL_DIRS
+        notifyMediaChanged(oldPath)
+        notifyMediaChanged(target.path)
+        return Uri.fromFile(target)
     }
 
     private fun organizeSaf(doc: IndexedDocument, rootTreeUri: Uri): Result<Uri> = runCatching {
         val root = DocumentFile.fromTreeUri(context, rootTreeUri) ?: error("Dossier racine inaccessible")
         val targetDir = ensurePath(root, doc.categoryPath)
+        copyThenDeleteSaf(doc, targetDir, doc.suggestedName.ifBlank { doc.originalName })
+    }
+
+    private fun trashSaf(doc: IndexedDocument, rootTreeUri: Uri): Result<Uri> = runCatching {
+        val root = DocumentFile.fromTreeUri(context, rootTreeUri) ?: error("Dossier racine inaccessible")
+        val targetDir = ensurePath(root, "RangIA_Corbeille")
+        copyThenDeleteSaf(doc, targetDir, doc.originalName)
+    }
+
+    private fun copyThenDeleteSaf(doc: IndexedDocument, targetDir: DocumentFile, desiredName: String): Uri {
         val source = DocumentFile.fromSingleUri(context, doc.contentUri) ?: error("Fichier source inaccessible")
-        val finalName = uniqueName(targetDir, doc.suggestedName)
+        val finalName = uniqueName(targetDir, desiredName)
         val target = targetDir.createFile(doc.mimeType.ifBlank { "application/octet-stream" }, finalName)
             ?: error("Impossible de créer le fichier cible")
 
@@ -77,7 +159,7 @@ class FileOrganizer(private val context: Context) {
             val sourceSize = source.length()
             if (sourceSize > 0 && target.length() != sourceSize) error("Vérification de copie échouée")
             if (!source.delete()) error("Copie créée, mais impossible de supprimer l'original")
-            target.uri
+            return target.uri
         } catch (t: Throwable) {
             if (copied) target.delete()
             throw t
@@ -119,12 +201,36 @@ class FileOrganizer(private val context: Context) {
         return File(dir, "${base}_${System.currentTimeMillis()}$ext")
     }
 
+    private fun relativePath(file: File): String {
+        val root = Environment.getExternalStorageDirectory()
+        return runCatching { file.relativeTo(root).invariantSeparatorsPath }.getOrDefault("")
+    }
+
+    private fun isProtectedPath(rel: String): Boolean {
+        val p = rel.lowercase(Locale.ROOT)
+        return p == "android" || p.startsWith("android/") || p == "telegram" || p.startsWith("telegram/") ||
+            p.startsWith(".trash") || p.startsWith(".thumbnails")
+    }
+
+    private fun isInRangIaTrash(file: File): Boolean = relativePath(file).startsWith("RangIA/Corbeille/")
+
+    private fun rangIaRoot(): File = File(Environment.getExternalStorageDirectory(), "RangIA")
+    private fun trashRoot(): File = File(rangIaRoot(), "Corbeille")
+
+    private fun notifyMediaChanged(path: String) {
+        runCatching { MediaScannerConnection.scanFile(context, arrayOf(path), null, null) }
+    }
+
     private fun sanitizePath(path: String): String = path.split('/').filter { it.isNotBlank() }
         .joinToString(File.separator) { it.replace(Regex("[\\:*?\"<>|]"), "_") }
 
     companion object {
-        private val SAFE_TOP_LEVEL_DIRS = setOf(
+        private val SAFE_AUTO_TOP_LEVEL_DIRS = setOf(
             "download", "downloads", "documents", "document", "bluetooth", "mishare", "shareme", "received", "received files"
+        )
+
+        private val USER_MANAGED_TOP_LEVEL_DIRS = SAFE_AUTO_TOP_LEVEL_DIRS + setOf(
+            "dcim", "pictures", "movies", "music", "podcasts", "ringtones", "alarms", "notifications", "rangia"
         )
     }
 }
