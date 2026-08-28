@@ -4,105 +4,198 @@ import java.text.Normalizer
 import java.util.Locale
 
 /**
- * High precision local rules used before the statistical classifier.
- * These rules only inspect the file name and OCR text already stored locally.
+ * High precision first-stage classifier.
+ *
+ * It deliberately prefers "A_verifier/Documents" over a wrong category. Strong document
+ * signatures are checked before the statistical model and ambiguous generic words are never
+ * enough on their own (for example "certificat" does not imply a vehicle document).
  */
 object SmartCategoryRefiner {
     val categories = listOf(
+        "A_verifier/Documents",
+        "Entreprise/Factures",
+        "Entreprise/Devis",
+        "Entreprise/URSSAF",
+        "Entreprise/Clients_commandes",
+        "Entreprise/Assurance_professionnelle",
+        "Travail/Fiches_de_paie",
+        "Travail/Contrats",
+        "Travail/France_Travail",
+        "Travail/Qualifications_habilitations",
         "Administratif/CAF",
         "Administratif/CPAM_Ameli",
         "Administratif/Retraite",
-        "Administratif/Prefecture",
+        "Administratif/Prefecture_ANTS",
+        "Administratif/Etat_civil",
         "Administratif/Attestations",
         "Sante/Ordonnances",
-        "Sante/Analyses",
+        "Sante/Analyses_resultats",
         "Sante/Mutuelle",
-        "Etudes/Diplomes",
+        "Sante/Rendez_vous",
+        "Etudes/Diplomes_certificats",
         "Etudes/Formations",
+        "Etudes/Releves_notes",
         "Identite/Carte_identite",
         "Identite/Passeport",
         "Identite/Permis_de_conduire",
         "Voiture/Carte_grise",
-        "Voiture/Assurance",
         "Voiture/Controle_technique",
-        "Voiture/Entretien",
+        "Voiture/Assurance",
+        "Voiture/Entretien_reparation",
+        "Voiture/Contraventions",
+        "Banque/RIB_IBAN",
+        "Banque/Releves",
+        "Banque/Credits",
+        "Impots/Avis_imposition",
+        "Impots/Declarations",
         "Logement/Bail",
         "Logement/Quittances",
         "Logement/Energie",
         "Logement/Telecom",
-        "Assurances/Habitation",
-        "Banque/RIB_IBAN",
-        "Banque/Releves",
-        "Achats/Tickets_et_recus",
-        "Achats/Garanties",
+        "Logement/Assurance_habitation",
+        "Achats/Tickets_recus",
+        "Achats/Garanties_SAV",
         "Voyages/Avion",
         "Voyages/Train",
-        "Entreprise/Factures",
-        "Entreprise/Devis",
-        "Entreprise/URSSAF",
-        "Entreprise/Clients",
-        "Travail/Fiches_de_paie",
-        "Travail/Contrats",
-        "Travail/France_Travail"
+        "Voyages/Hotels_reservations",
+        "Notices/Manuels"
     )
 
     fun refine(fileName: String, text: String): ClassificationResult? {
+        val file = normalize(fileName)
         val value = normalize("$fileName\n${text.take(120_000)}")
         if (value.isBlank()) return null
 
         fun has(vararg terms: String): Boolean = terms.any { normalize(it) in value }
+        fun fileHas(vararg terms: String): Boolean = terms.any { normalize(it) in file }
         fun hasAll(vararg terms: String): Boolean = terms.all { normalize(it) in value }
         fun result(category: String, confidence: Float, vararg evidence: String) =
             ClassificationResult(category, confidence, evidence.toList())
 
-        return when {
-            has("carte nationale d identite", "cni") -> result("Identite/Carte_identite", .98f, "carte d'identité")
-            has("passeport", "passport") && has("nationalite", "date de naissance", "expiry") -> result("Identite/Passeport", .98f, "passeport")
-            has("permis de conduire", "driving licence") -> result("Identite/Permis_de_conduire", .98f, "permis de conduire")
-            has("certificat d immatriculation", "carte grise") -> result("Voiture/Carte_grise", .98f, "carte grise")
-            has("controle technique", "contre visite", "defaillance majeure") -> result("Voiture/Controle_technique", .98f, "contrôle technique")
-            has("assurance automobile", "assurance auto", "vehicule assure") -> result("Voiture/Assurance", .97f, "assurance auto")
-            has("vidange", "revision automobile", "garage", "pneumatique", "courroie") && has("vehicule", "kilometrage", "main d oeuvre", "piece") -> result("Voiture/Entretien", .94f, "entretien véhicule")
+        // Education / qualifications are intentionally checked before vehicle documents.
+        if (
+            has("certificat d aptitude professionnelle", "diplome national du brevet", "baccalaureat", "brevet professionnel", "diplome") ||
+            (fileHas("cap ", "cap_", "cap-") && has("education nationale", "academie", "certificat d aptitude"))
+        ) return result("Etudes/Diplomes_certificats", .995f, "diplôme/certificat", "éducation")
 
-            has("allocations familiales", "caf.fr", "caisse d allocations familiales", "aide au logement") -> result("Administratif/CAF", .97f, "CAF")
-            has("assurance maladie", "ameli.fr", "cpam", "caisse primaire d assurance maladie") -> result("Administratif/CPAM_Ameli", .97f, "CPAM/Ameli")
-            has("agirc arrco", "carsat", "assurance retraite", "retraite complementaire") -> result("Administratif/Retraite", .96f, "retraite")
-            has("prefecture", "sous prefecture", "titre de sejour", "ants") && !has("carte grise") -> result("Administratif/Prefecture", .94f, "préfecture")
-            has("attestation", "certifie que") && has("domicile", "hebergement", "honneur", "droits") -> result("Administratif/Attestations", .90f, "attestation")
+        if (has("releve de notes", "bulletin scolaire", "resultats examen", "notes obtenues"))
+            return result("Etudes/Releves_notes", .985f, "relevé de notes")
 
-            has("ordonnance", "prescription medicale") -> result("Sante/Ordonnances", .97f, "ordonnance")
-            has("laboratoire de biologie", "resultats d analyses", "analyse biologique", "hematologie") -> result("Sante/Analyses", .97f, "analyses")
-            has("mutuelle", "complementaire sante", "tiers payant") -> result("Sante/Mutuelle", .95f, "mutuelle")
+        if (has("attestation de formation", "certificat de formation", "formation professionnelle", "organisme de formation") &&
+            !has("caces", "habilitation electrique", "sst", "sauveteur secouriste"))
+            return result("Etudes/Formations", .965f, "formation")
 
-            has("diplome", "certificat d aptitude professionnelle", "baccalaureat", "brevet professionnel") -> result("Etudes/Diplomes", .97f, "diplôme")
-            has("caces", "habilitation electrique", "attestation de formation", "certificat de formation") -> result("Etudes/Formations", .96f, "formation")
+        if (has("caces", "habilitation electrique", "sauveteur secouriste du travail", "sst", "autorisation de conduite"))
+            return result("Travail/Qualifications_habilitations", .985f, "qualification/habilitation")
 
-            has("quittance de loyer") -> result("Logement/Quittances", .98f, "quittance")
-            has("contrat de location", "bail d habitation", "bailleur", "locataire") -> result("Logement/Bail", .96f, "bail")
-            has("edf", "engie", "electricite", "gaz naturel") && has("facture", "echeance", "consommation") -> result("Logement/Energie", .95f, "énergie")
-            has("orange", "sfr", "bouygues telecom", "free mobile", "freebox") && has("facture", "abonnement", "forfait") -> result("Logement/Telecom", .94f, "télécom")
-            has("assurance habitation", "multirisque habitation") -> result("Assurances/Habitation", .96f, "assurance habitation")
+        // Identity.
+        if (has("carte nationale d identite", "cni") && has("nom", "prenom", "nationalite"))
+            return result("Identite/Carte_identite", .995f, "carte d'identité")
+        if (has("passeport", "passport") && has("nationalite", "date de naissance", "expiry", "expiration"))
+            return result("Identite/Passeport", .995f, "passeport")
+        if (has("permis de conduire", "driving licence", "driving license"))
+            return result("Identite/Permis_de_conduire", .995f, "permis de conduire")
 
-            has("releve d identite bancaire", "rib") || hasAll("iban", "bic") -> result("Banque/RIB_IBAN", .97f, "RIB/IBAN")
-            has("releve de compte", "solde precedent", "operations debit credit") -> result("Banque/Releves", .96f, "relevé bancaire")
+        // Vehicle: each class requires an unmistakable vehicle signature.
+        if (has("certificat d immatriculation", "carte grise") && has("immatriculation", "vehicule", "vin", "numero d identification"))
+            return result("Voiture/Carte_grise", .995f, "certificat d'immatriculation")
+        if (has("controle technique", "contre visite", "defaillance majeure", "defaillance critique") && has("vehicule", "immatriculation", "kilometrage"))
+            return result("Voiture/Controle_technique", .995f, "contrôle technique", "véhicule")
+        if (has("assurance automobile", "assurance auto", "vehicule assure", "attestation d assurance automobile"))
+            return result("Voiture/Assurance", .985f, "assurance automobile")
+        if (has("amende forfaitaire", "avis de contravention", "antai") && has("immatriculation", "vehicule", "infraction"))
+            return result("Voiture/Contraventions", .985f, "contravention")
+        if (has("vidange", "revision automobile", "pneumatique", "courroie de distribution", "plaquettes de frein") &&
+            has("vehicule", "kilometrage", "garage", "main d oeuvre", "immatriculation"))
+            return result("Voiture/Entretien_reparation", .965f, "entretien véhicule")
 
-            has("ticket de caisse", "recu de paiement", "recu carte bancaire") -> result("Achats/Tickets_et_recus", .94f, "ticket/reçu")
-            has("garantie", "warranty", "service apres vente") && has("numero de serie", "date d achat", "produit") -> result("Achats/Garanties", .94f, "garantie")
+        // Work / employment.
+        if (has("bulletin de paie", "fiche de paie", "net a payer", "net social") && has("salaire", "employeur", "cotisations"))
+            return result("Travail/Fiches_de_paie", .995f, "bulletin de paie")
+        if (has("contrat de travail", "contrat de mission") && has("employeur", "salarie", "remuneration", "date d embauche"))
+            return result("Travail/Contrats", .985f, "contrat de travail")
+        if (has("france travail", "pole emploi", "allocation retour emploi", "allocation d aide au retour", "arce") ||
+            (has("are") && has("demandeur d emploi", "indemnisation")))
+            return result("Travail/France_Travail", .985f, "France Travail")
 
-            has("carte d embarquement", "boarding pass", "numero de vol", "flight") -> result("Voyages/Avion", .96f, "avion")
-            has("sncf", "billet de train", "tgv", "ter") && has("depart", "arrivee", "voyageur") -> result("Voyages/Train", .95f, "train")
+        // Public administration.
+        if (has("allocations familiales", "caf fr", "caisse d allocations familiales", "aide personnalisee au logement"))
+            return result("Administratif/CAF", .985f, "CAF")
+        if (has("assurance maladie", "ameli fr", "cpam", "caisse primaire d assurance maladie"))
+            return result("Administratif/CPAM_Ameli", .985f, "CPAM/Ameli")
+        if (has("agirc arrco", "carsat", "assurance retraite", "retraite complementaire"))
+            return result("Administratif/Retraite", .975f, "retraite")
+        if (has("prefecture", "sous prefecture", "ants", "agence nationale des titres securises") && !has("carte grise", "certificat d immatriculation"))
+            return result("Administratif/Prefecture_ANTS", .955f, "préfecture/ANTS")
+        if (has("acte de naissance", "extrait d acte de naissance", "acte de mariage", "livret de famille"))
+            return result("Administratif/Etat_civil", .985f, "état civil")
+        if (has("attestation sur l honneur", "attestation d hebergement", "certifie sur l honneur"))
+            return result("Administratif/Attestations", .965f, "attestation")
 
-            has("bulletin de paie", "fiche de paie", "net a payer", "net social") -> result("Travail/Fiches_de_paie", .98f, "paie")
-            has("contrat de travail", "contrat de mission", "cdi", "cdd") && has("employeur", "salarie", "remuneration") -> result("Travail/Contrats", .96f, "contrat de travail")
-            has("france travail", "pole emploi", "allocation retour emploi", "arce", "are") -> result("Travail/France_Travail", .97f, "France Travail")
+        // Health.
+        if (has("ordonnance", "prescription medicale") && has("medecin", "patient", "pharmacie", "posologie"))
+            return result("Sante/Ordonnances", .985f, "ordonnance")
+        if (has("laboratoire de biologie", "resultats d analyses", "analyse biologique", "hematologie", "biochimie"))
+            return result("Sante/Analyses_resultats", .985f, "analyses médicales")
+        if (has("mutuelle", "complementaire sante", "tiers payant") && !has("assurance automobile"))
+            return result("Sante/Mutuelle", .965f, "mutuelle")
+        if (has("rendez vous", "convocation") && has("hopital", "clinique", "medecin", "consultation"))
+            return result("Sante/Rendez_vous", .935f, "rendez-vous médical")
 
-            has("urssaf", "cotisations sociales", "micro entrepreneur") -> result("Entreprise/URSSAF", .98f, "URSSAF")
-            has("devis", "bon pour accord", "validite du devis") -> result("Entreprise/Devis", .97f, "devis")
-            has("facture", "invoice") && has("total ttc", "montant a payer", "net a payer", "tva") -> result("Entreprise/Factures", .96f, "facture")
-            has("bon de commande", "fiche intervention", "chantier") && has("client", "prestation", "commande") -> result("Entreprise/Clients", .92f, "client/chantier")
+        // Banking / taxes.
+        if (has("releve d identite bancaire", "rib") || hasAll("iban", "bic"))
+            return result("Banque/RIB_IBAN", .985f, "RIB/IBAN")
+        if (has("releve de compte", "solde precedent", "solde crediteur", "solde debiteur") && has("debit", "credit", "operations", "virement"))
+            return result("Banque/Releves", .975f, "relevé bancaire")
+        if (has("offre de pret", "tableau d amortissement", "credit immobilier", "credit consommation"))
+            return result("Banque/Credits", .965f, "crédit")
+        if (has("avis d imposition", "avis d impot", "revenu fiscal de reference", "direction generale des finances publiques"))
+            return result("Impots/Avis_imposition", .99f, "avis d'imposition")
+        if (has("declaration de revenus", "declaration revenus", "formulaire 2042"))
+            return result("Impots/Declarations", .975f, "déclaration fiscale")
 
-            else -> null
-        }
+        // Housing and recurring providers before generic invoices.
+        if (has("quittance de loyer"))
+            return result("Logement/Quittances", .995f, "quittance de loyer")
+        if (has("contrat de location", "bail d habitation", "bailleur") && has("locataire", "loyer", "depot de garantie"))
+            return result("Logement/Bail", .985f, "bail")
+        if (has("assurance habitation", "multirisque habitation"))
+            return result("Logement/Assurance_habitation", .975f, "assurance habitation")
+        if (has("edf", "engie", "totalenergies", "electricite", "gaz naturel") && has("facture", "consommation", "kwh", "point de livraison"))
+            return result("Logement/Energie", .965f, "énergie")
+        if (has("orange", "sfr", "bouygues telecom", "free mobile", "freebox") && has("facture", "abonnement", "forfait"))
+            return result("Logement/Telecom", .955f, "télécom")
+
+        // Business.
+        if (has("urssaf", "cotisations sociales", "micro entrepreneur", "auto entrepreneur") && has("cotisation", "declaration", "chiffre d affaires", "urssaf"))
+            return result("Entreprise/URSSAF", .99f, "URSSAF")
+        if (has("devis", "quotation", "bon pour accord") && has("prix", "total", "validite", "travaux", "prestation"))
+            return result("Entreprise/Devis", .98f, "devis")
+        if (has("assurance responsabilite civile professionnelle", "responsabilite civile professionnelle", "assurance decennale", "garantie decennale"))
+            return result("Entreprise/Assurance_professionnelle", .985f, "assurance professionnelle")
+        if (has("bon de commande", "fiche intervention") && has("client", "prestation", "commande", "chantier"))
+            return result("Entreprise/Clients_commandes", .955f, "client/commande")
+        if (has("facture", "invoice") && has("total ttc", "montant a payer", "net a payer", "tva", "siret", "siren"))
+            return result("Entreprise/Factures", .965f, "facture")
+
+        // Purchases / warranty.
+        if (has("ticket de caisse", "recu de paiement", "recu carte bancaire"))
+            return result("Achats/Tickets_recus", .955f, "ticket/reçu")
+        if (has("garantie", "warranty", "service apres vente", "sav") && has("numero de serie", "date d achat", "produit", "reparation"))
+            return result("Achats/Garanties_SAV", .955f, "garantie/SAV")
+
+        // Travel.
+        if (has("carte d embarquement", "boarding pass", "numero de vol", "flight number"))
+            return result("Voyages/Avion", .975f, "avion")
+        if (has("sncf", "billet de train", "tgv", "ter") && has("depart", "arrivee", "voyageur"))
+            return result("Voyages/Train", .965f, "train")
+        if (has("reservation hotel", "booking confirmation", "confirmation de reservation") && has("chambre", "hotel", "check in", "nuit"))
+            return result("Voyages/Hotels_reservations", .945f, "hôtel/réservation")
+
+        if (has("mode d emploi", "manuel utilisateur", "user manual", "notice d utilisation"))
+            return result("Notices/Manuels", .955f, "notice/manuel")
+
+        return null
     }
 
     private fun normalize(input: String): String = Normalizer.normalize(input.lowercase(Locale.FRENCH), Normalizer.Form.NFD)
