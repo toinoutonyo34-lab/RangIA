@@ -91,7 +91,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _documents.value = updated
                 withContext(Dispatchers.IO) { store.save(updated) }
                 val mode = if (useWholePhone) "du téléphone" else "du dossier"
-                _message.value = "Analyse $mode terminée : ${updated.size} fichier(s) indexé(s)."
+                val review = updated.count { it.needsReview }
+                _message.value = "Analyse $mode terminée : ${updated.size} fichier(s), $review à vérifier."
             } catch (t: Throwable) {
                 _message.value = "Erreur : ${t.message ?: "analyse impossible"}"
             } finally {
@@ -101,8 +102,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun reclassifyAll() {
+        if (_busy.value) return
+        val reset = _documents.value.map { it.copy(classificationVersion = 0) }
+        _documents.value = reset
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.save(reset) }
+            scanNow()
+        }
+    }
+
     fun organize(doc: IndexedDocument) {
         if (_busy.value) return
+        if (doc.needsReview) {
+            _message.value = "Ce document doit être vérifié ou reclassé avant d’être déplacé."
+            return
+        }
         viewModelScope.launch {
             _busy.value = true
             try {
@@ -173,7 +188,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _busy.value = true
             val candidates = _documents.value.filter { doc ->
-                if (doc.duplicate || doc.categoryPath == "Autres" || doc.categoryPath == "Fichiers/Autres" || doc.confidence < 0.88f) return@filter false
+                if (doc.duplicate || doc.needsReview || doc.confidence < 0.90f) return@filter false
                 if (doc.parentTreeUri == DocumentScanner.WHOLE_PHONE_MARKER || doc.contentUri.scheme == "file") {
                     val path = doc.contentUri.path ?: return@filter false
                     val f = File(path)
@@ -182,7 +197,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             if (candidates.isEmpty()) {
-                _message.value = "Aucun fichier suffisamment sûr à déplacer automatiquement. Les autres restent classés virtuellement dans RangIA."
+                _message.value = "Aucun fichier suffisamment sûr à déplacer. Les documents incertains restent dans À vérifier."
                 _busy.value = false
                 return@launch
             }
@@ -204,40 +219,80 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Nettoyage prudent des doublons exacts SHA-256.
-     * Pour chaque groupe, RangIA ne met à la corbeille que les fichiers qu'elle peut modifier sans
-     * toucher aux zones privées d'autres applications, et conserve toujours au moins une copie
-     * dans un emplacement utilisateur modifiable.
-     */
     fun cleanupDuplicates() {
+        val removable = duplicateRemovable(_documents.value)
+        if (removable.isEmpty()) {
+            _message.value = "Aucun doublon supprimable n’a été trouvé."
+            return
+        }
+        moveDuplicateSetToTrash(removable)
+    }
+
+    fun cleanupDuplicateGroup(hash: String) {
+        val group = _documents.value.filter { it.hash == hash && hash.isNotBlank() }
+        val removable = duplicateRemovable(group)
+        if (removable.isEmpty()) {
+            _message.value = "Aucune copie supplémentaire supprimable dans ce groupe."
+            return
+        }
+        moveDuplicateSetToTrash(removable)
+    }
+
+    fun deleteDuplicateGroupPermanently(hash: String) {
         if (_busy.value) return
-        val duplicateGroups = _documents.value
-            .filter { it.hash.isNotBlank() }
+        val group = _documents.value.filter { it.hash == hash && hash.isNotBlank() }
+        val removable = duplicateRemovable(group)
+        if (removable.isEmpty()) {
+            _message.value = "Aucune copie supplémentaire supprimable dans ce groupe."
+            return
+        }
+        viewModelScope.launch {
+            _busy.value = true
+            var deleted = 0
+            var failed = 0
+            var bytes = 0L
+            try {
+                removable.forEachIndexed { index, doc ->
+                    _progress.value = "Suppression ${index + 1}/${removable.size} · ${doc.originalName}"
+                    organizer.deletePermanently(doc)
+                        .onSuccess { deleted++; bytes += doc.size }
+                        .onFailure { failed++ }
+                }
+                rescanAfterOperation()
+                _message.value = "$deleted copie(s) supprimée(s) définitivement · ${formatBytes(bytes)} libérés" +
+                    if (failed > 0) " · $failed ignorée(s)." else "."
+            } finally {
+                _progress.value = ""
+                _busy.value = false
+            }
+        }
+    }
+
+    private fun duplicateRemovable(source: List<IndexedDocument>): List<IndexedDocument> {
+        return source.filter { it.hash.isNotBlank() }
             .groupBy { it.hash }
             .values
             .filter { it.size > 1 }
-
-        val removable = duplicateGroups.flatMap { group ->
-            val modifiable = group.filter(organizer::canModify)
-            if (modifiable.size <= 1) emptyList()
-            else {
-                val keeper = modifiable.minWithOrNull(
-                    compareBy<IndexedDocument>(
-                        { if (it.relativePath.contains("RangIA", ignoreCase = true)) 0 else 1 },
-                        { if (it.relativePath.contains("Documents", ignoreCase = true)) 0 else 1 },
-                        { -it.modifiedAt }
-                    )
-                )
-                modifiable.filterNot { it.uri == keeper?.uri }
+            .flatMap { group ->
+                val keeper = chooseKeeper(group)
+                group.filter { it.uri != keeper.uri && organizer.canModify(it) }
             }
-        }.distinctBy { it.uri }
+            .distinctBy { it.uri }
+    }
 
-        if (removable.isEmpty()) {
-            _message.value = "Aucun doublon ne peut être nettoyé automatiquement sans risque."
-            return
-        }
+    private fun chooseKeeper(group: List<IndexedDocument>): IndexedDocument {
+        return group.minWithOrNull(
+            compareBy<IndexedDocument>(
+                { if (it.relativePath.contains("Documents", ignoreCase = true)) 0 else 1 },
+                { if (it.relativePath.contains("DCIM", ignoreCase = true)) 0 else 1 },
+                { if (it.relativePath.contains("RangIA", ignoreCase = true)) 0 else 1 },
+                { -it.modifiedAt }
+            )
+        ) ?: group.first()
+    }
 
+    private fun moveDuplicateSetToTrash(removable: List<IndexedDocument>) {
+        if (_busy.value) return
         viewModelScope.launch {
             _busy.value = true
             val tree = prefs.treeUri?.let(Uri::parse)
@@ -272,8 +327,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     val learnedExamplesCount: Int get() = classifier.learnedExamplesCount()
-    val aiCategories: List<String> get() = (LocalAiEngine.categories + listOf(
-        "Documents/PDF", "Documents/Texte", "Documents/Word", "Documents/Tableurs", "Documents/Présentations",
+    val aiCategories: List<String> get() = (SmartCategoryRefiner.categories + listOf(
+        "Documents/Texte", "Documents/Word", "Documents/Tableurs", "Documents/Présentations",
         "Photos/Captures_ecran", "Photos/Appareil_photo", "Photos/Messageries", "Photos/Autres",
         "Vidéos/Appareil_photo", "Vidéos/Messageries", "Vidéos/Autres",
         "Audio/Messages_vocaux", "Audio/Musique", "Audio/Autres",
@@ -287,12 +342,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (it.uri == doc.uri) it.copy(
                 categoryPath = category,
                 confidence = 0.99f,
-                suggestedName = DocumentIntelligence.suggestFileName(it.originalName, category, entities)
+                suggestedName = DocumentIntelligence.suggestFileName(it.originalName, category, entities),
+                classificationVersion = HybridClassifier.MODEL_VERSION,
+                classificationEvidence = listOf("correction manuelle")
             ) else it
         }
         _documents.value = updated
         viewModelScope.launch(Dispatchers.IO) { store.save(updated) }
-        _message.value = "Correction mémorisée. RangIA apprendra de ce fichier."
+        _message.value = "Correction mémorisée. RangIA utilisera cet exemple pour les documents similaires."
     }
 
     fun resetAiLearning() {
