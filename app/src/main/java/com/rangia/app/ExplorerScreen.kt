@@ -1,10 +1,12 @@
 package com.rangia.app
 
 import android.content.Intent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -15,11 +17,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.Locale
 
 private val ExplorerBlue = Color(0xFF2678F3)
@@ -45,9 +52,39 @@ fun RangIaExplorerScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     var showMove by remember { mutableStateOf(false) }
 
-    val visibleEntries = remember(state.entries, state.query) {
-        if (state.query.isBlank()) state.entries
+    val visibleEntries = remember(state.entries, state.query, state.filter, state.sort) {
+        var base = if (state.query.isBlank()) state.entries
         else state.entries.filter { it.name.contains(state.query, ignoreCase = true) }
+
+        base = when (state.filter) {
+            ExplorerFilter.ALL -> base
+            ExplorerFilter.FOLDERS -> base.filter { it.isDirectory }
+            ExplorerFilter.DOCUMENTS -> base.filter {
+                !it.isDirectory && (
+                    it.mimeType == "application/pdf" ||
+                    it.mimeType.startsWith("text/") ||
+                    it.name.endsWith(".doc", true) || it.name.endsWith(".docx", true) ||
+                    it.name.endsWith(".xls", true) || it.name.endsWith(".xlsx", true) ||
+                    it.name.endsWith(".ppt", true) || it.name.endsWith(".pptx", true)
+                )
+            }
+            ExplorerFilter.IMAGES -> base.filter { it.mimeType.startsWith("image/") }
+            ExplorerFilter.VIDEOS -> base.filter { it.mimeType.startsWith("video/") }
+            ExplorerFilter.AUDIO -> base.filter { it.mimeType.startsWith("audio/") }
+            ExplorerFilter.ARCHIVES_APK -> base.filter {
+                !it.isDirectory && (
+                    it.name.endsWith(".zip", true) || it.name.endsWith(".rar", true) ||
+                    it.name.endsWith(".7z", true) || it.name.endsWith(".apk", true)
+                )
+            }
+        }
+
+        val dirFirst = compareByDescending<ExplorerEntry> { it.isDirectory }
+        when (state.sort) {
+            ExplorerSort.NAME -> base.sortedWith(dirFirst.thenBy { it.name.lowercase(Locale.FRENCH) })
+            ExplorerSort.RECENT -> base.sortedWith(dirFirst.thenByDescending { it.modifiedAt })
+            ExplorerSort.SIZE -> base.sortedWith(dirFirst.thenByDescending { it.size })
+        }
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -99,6 +136,44 @@ fun RangIaExplorerScreen(
             },
             placeholder = { Text("Rechercher dans ce dossier") }
         )
+
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 15.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            item {
+                ExplorerFilterChip("Tout", ExplorerFilter.ALL, state.filter, ExplorerPurple, vm::setFilter)
+            }
+            item {
+                ExplorerFilterChip("Dossiers", ExplorerFilter.FOLDERS, state.filter, ExplorerBlue, vm::setFilter)
+            }
+            item {
+                ExplorerFilterChip("Documents", ExplorerFilter.DOCUMENTS, state.filter, ExplorerPurple, vm::setFilter)
+            }
+            item {
+                ExplorerFilterChip("Images", ExplorerFilter.IMAGES, state.filter, Color(0xFF9A55D4), vm::setFilter)
+            }
+            item {
+                ExplorerFilterChip("Vidéos", ExplorerFilter.VIDEOS, state.filter, ExplorerRed, vm::setFilter)
+            }
+            item {
+                ExplorerFilterChip("Audio", ExplorerFilter.AUDIO, state.filter, Color(0xFF8058D7), vm::setFilter)
+            }
+            item {
+                ExplorerFilterChip("Archives / APK", ExplorerFilter.ARCHIVES_APK, state.filter, ExplorerGreen, vm::setFilter)
+            }
+        }
+
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Trier :", color = ExplorerMuted, style = MaterialTheme.typography.labelMedium)
+            ExplorerSortChip("Nom", ExplorerSort.NAME, state.sort, vm::setSort)
+            ExplorerSortChip("Récent", ExplorerSort.RECENT, state.sort, vm::setSort)
+            ExplorerSortChip("Taille", ExplorerSort.SIZE, state.sort, vm::setSort)
+        }
 
         if (state.selected.isNotEmpty()) {
             Surface(
@@ -305,17 +380,7 @@ private fun ExplorerEntryCard(
                 onCheckedChange = { vm.toggleSelection(entry.relativePath) }
             )
 
-            Box(
-                Modifier.size(52.dp).clip(RoundedCornerShape(15.dp)).background(accent.copy(alpha = .12f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    if (entry.isDirectory) Icons.Default.Folder else explorerIcon(entry),
-                    null,
-                    tint = accent,
-                    modifier = Modifier.size(28.dp)
-                )
-            }
+            ExplorerEntryPreview(entry, accent, Modifier.size(58.dp))
 
             Spacer(Modifier.width(10.dp))
 
@@ -358,6 +423,77 @@ private fun ExplorerEntryCard(
             }
         }
     }
+}
+
+
+@Composable
+private fun ExplorerEntryPreview(entry: ExplorerEntry, accent: Color, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, entry.absolutePath, entry.modifiedAt, entry.size) {
+        value = if (entry.isDirectory) null else withContext(Dispatchers.IO) {
+            FilePreviewLoader.load(
+                context = context,
+                uri = android.net.Uri.fromFile(File(entry.absolutePath)),
+                mimeType = entry.mimeType,
+                fileName = entry.name,
+                targetPx = 180
+            )
+        }
+    }
+
+    Box(
+        modifier.clip(RoundedCornerShape(16.dp)).background(accent.copy(alpha = .12f)),
+        contentAlignment = Alignment.Center
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap!!.asImageBitmap(),
+                contentDescription = entry.name,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Icon(
+                if (entry.isDirectory) Icons.Default.Folder else explorerIcon(entry),
+                null,
+                tint = accent,
+                modifier = Modifier.size(30.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ExplorerFilterChip(
+    label: String,
+    value: ExplorerFilter,
+    selected: ExplorerFilter,
+    color: Color,
+    onSelect: (ExplorerFilter) -> Unit
+) {
+    FilterChip(
+        selected = value == selected,
+        onClick = { onSelect(value) },
+        label = { Text(label, fontWeight = if (value == selected) FontWeight.Bold else FontWeight.Medium) },
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = color.copy(alpha = .14f),
+            selectedLabelColor = color
+        )
+    )
+}
+
+@Composable
+private fun ExplorerSortChip(
+    label: String,
+    value: ExplorerSort,
+    selected: ExplorerSort,
+    onSelect: (ExplorerSort) -> Unit
+) {
+    FilterChip(
+        selected = value == selected,
+        onClick = { onSelect(value) },
+        label = { Text(label) }
+    )
 }
 
 @Composable
