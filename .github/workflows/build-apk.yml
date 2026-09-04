@@ -35,6 +35,9 @@ jobs:
         with:
           gradle-version: '8.13'
 
+      - name: Run classifier regression tests
+        run: gradle :app:testDebugUnitTest --stacktrace
+
       - name: Build debug APK and release bundle
         run: gradle clean :app:assembleDebug :app:bundleRelease --stacktrace
 
