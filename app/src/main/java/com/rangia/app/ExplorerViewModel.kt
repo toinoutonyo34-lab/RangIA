@@ -26,10 +26,15 @@ data class ExplorerEntry(
     val isFavorite: Boolean
 )
 
+enum class ExplorerFilter { ALL, FOLDERS, DOCUMENTS, IMAGES, VIDEOS, AUDIO, ARCHIVES_APK }
+enum class ExplorerSort { NAME, RECENT, SIZE }
+
 data class ExplorerUiState(
     val currentPath: String = "",
     val entries: List<ExplorerEntry> = emptyList(),
     val query: String = "",
+    val filter: ExplorerFilter = ExplorerFilter.ALL,
+    val sort: ExplorerSort = ExplorerSort.NAME,
     val selected: Set<String> = emptySet(),
     val loading: Boolean = false,
     val message: String? = null
@@ -45,6 +50,8 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
     init { refresh() }
 
     fun setQuery(value: String) { _state.value = _state.value.copy(query = value) }
+    fun setFilter(value: ExplorerFilter) { _state.value = _state.value.copy(filter = value) }
+    fun setSort(value: ExplorerSort) { _state.value = _state.value.copy(sort = value) }
     fun clearMessage() { _state.value = _state.value.copy(message = null) }
 
     fun openFolder(relativePath: String) {
@@ -52,7 +59,7 @@ class ExplorerViewModel(application: Application) : AndroidViewModel(application
             _state.value = _state.value.copy(message = "Ce dossier Android est protégé.")
             return
         }
-        _state.value = _state.value.copy(currentPath = normalize(relativePath), selected = emptySet(), query = "")
+        _state.value = _state.value.copy(currentPath = normalize(relativePath), selected = emptySet(), query = "", filter = ExplorerFilter.ALL)
         refresh()
     }
 
