@@ -67,6 +67,7 @@ private val ExpertColors = lightColorScheme(
 
 class RangIaV3Activity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
+    private val explorerVm: ExplorerViewModel by viewModels()
     private lateinit var billing: BillingManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -79,6 +80,7 @@ class RangIaV3Activity : ComponentActivity() {
                 val billingStatus by billing.status.collectAsState()
                 ExpertRangIa(
                     vm = vm,
+                    explorerVm = explorerVm,
                     isPro = BuildConfig.DEBUG || paidPro,
                     price = price,
                     billingStatus = billingStatus,
@@ -123,6 +125,7 @@ private data class XNav(val tab: XTab, val icon: ImageVector, val label: String,
 @Composable
 private fun ExpertRangIa(
     vm: MainViewModel,
+    explorerVm: ExplorerViewModel,
     isPro: Boolean,
     price: String?,
     billingStatus: String?,
@@ -145,7 +148,7 @@ private fun ExpertRangIa(
 
     val nav = listOf(
         XNav(XTab.HOME, Icons.Default.Home, "Accueil", XPurple),
-        XNav(XTab.LIBRARY, Icons.Default.FolderCopy, "Bibliothèque", XBlue),
+        XNav(XTab.LIBRARY, Icons.Default.FolderCopy, "Explorer", XBlue),
         XNav(XTab.DUPLICATES, Icons.Default.ContentCopy, "Doublons", XGreen),
         XNav(XTab.SEARCH, Icons.Default.Search, "Recherche", XOrange),
         XNav(XTab.SETTINGS, Icons.Default.Tune, "Réglages", XPink)
@@ -188,7 +191,7 @@ private fun ExpertRangIa(
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (tab) {
                 XTab.HOME -> ExpertHome(docs, fullAccess, busy, progress, requestAccess, vm::scanNow, vm::reclassifyAll, { tab = XTab.LIBRARY }, { tab = XTab.DUPLICATES })
-                XTab.LIBRARY -> ExpertLibrary(docs, vm.aiCategories, vm::organize, vm::moveToTrash, vm::deletePermanently, vm::correctCategory)
+                XTab.LIBRARY -> RangIaExplorerScreen(explorerVm, fullAccess, requestAccess)
                 XTab.DUPLICATES -> ExpertDuplicates(docs, isPro, vm::cleanupDuplicates, vm::cleanupDuplicateGroup, vm::deleteDuplicateGroupPermanently, vm::emptyTrash) { showPro = true }
                 XTab.SEARCH -> ExpertSearch(docs, vm.aiCategories, vm::organize, vm::moveToTrash, vm::deletePermanently, vm::correctCategory)
                 XTab.SETTINGS -> ExpertSettings(vm, fullAccess, isPro, price, requestAccess, { folderPicker.launch(null) }, { showPro = true }, restorePro)
