@@ -3,7 +3,7 @@ name: Build RangIA 1.0
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, rangia-v4-expert ]
     paths:
       - 'app/**'
       - 'build.gradle.kts'
