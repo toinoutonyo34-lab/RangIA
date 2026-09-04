@@ -67,6 +67,7 @@ private val ExpertColors = lightColorScheme(
 
 class RangIaV3Activity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
+    private val explorerVm: ExplorerViewModel by viewModels()
     private lateinit var billing: BillingManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -79,6 +80,7 @@ class RangIaV3Activity : ComponentActivity() {
                 val billingStatus by billing.status.collectAsState()
                 ExpertRangIa(
                     vm = vm,
+                    explorerVm = explorerVm,
                     isPro = BuildConfig.DEBUG || paidPro,
                     price = price,
                     billingStatus = billingStatus,
@@ -116,13 +118,14 @@ class RangIaV3Activity : ComponentActivity() {
     }
 }
 
-private enum class XTab { HOME, LIBRARY, DUPLICATES, SEARCH, SETTINGS }
+private enum class XTab { HOME, EXPLORER, AI, DUPLICATES, SEARCH, SETTINGS }
 private data class XNav(val tab: XTab, val icon: ImageVector, val label: String, val color: Color)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ExpertRangIa(
     vm: MainViewModel,
+    explorerVm: ExplorerViewModel,
     isPro: Boolean,
     price: String?,
     billingStatus: String?,
@@ -145,10 +148,10 @@ private fun ExpertRangIa(
 
     val nav = listOf(
         XNav(XTab.HOME, Icons.Default.Home, "Accueil", XPurple),
-        XNav(XTab.LIBRARY, Icons.Default.FolderCopy, "Bibliothèque", XBlue),
-        XNav(XTab.DUPLICATES, Icons.Default.ContentCopy, "Doublons", XGreen),
-        XNav(XTab.SEARCH, Icons.Default.Search, "Recherche", XOrange),
-        XNav(XTab.SETTINGS, Icons.Default.Tune, "Réglages", XPink)
+        XNav(XTab.EXPLORER, Icons.Default.FolderCopy, "Explorer", XBlue),
+        XNav(XTab.AI, Icons.Default.AutoAwesome, "IA", XPurple),
+        XNav(XTab.DUPLICATES, Icons.Default.ContentCopy, "Nettoyer", XGreen),
+        XNav(XTab.SEARCH, Icons.Default.Search, "Recherche", XOrange)
     )
 
     Scaffold(
@@ -180,6 +183,9 @@ private fun ExpertRangIa(
                     IconButton(onClick = vm::scanNow, enabled = !busy) {
                         Icon(Icons.Default.Refresh, "Analyser", tint = if (busy) XMuted else XPurple)
                     }
+                    IconButton(onClick = { tab = XTab.SETTINGS }) {
+                        Icon(Icons.Default.Settings, "Réglages", tint = XPink)
+                    }
                 }
             )
         },
@@ -187,8 +193,9 @@ private fun ExpertRangIa(
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (tab) {
-                XTab.HOME -> ExpertHome(docs, fullAccess, busy, progress, requestAccess, vm::scanNow, vm::reclassifyAll, { tab = XTab.LIBRARY }, { tab = XTab.DUPLICATES })
-                XTab.LIBRARY -> ExpertLibrary(docs, vm.aiCategories, vm::organize, vm::moveToTrash, vm::deletePermanently, vm::correctCategory)
+                XTab.HOME -> ExpertHome(docs, fullAccess, busy, progress, requestAccess, vm::scanNow, vm::reclassifyAll, { tab = XTab.AI }, { tab = XTab.DUPLICATES })
+                XTab.EXPLORER -> RangIaExplorerScreen(explorerVm, fullAccess, requestAccess)
+                XTab.AI -> ExpertLibrary(docs, vm.aiCategories, vm::organize, vm::moveToTrash, vm::deletePermanently, vm::correctCategory)
                 XTab.DUPLICATES -> ExpertDuplicates(docs, isPro, vm::cleanupDuplicates, vm::cleanupDuplicateGroup, vm::deleteDuplicateGroupPermanently, vm::emptyTrash) { showPro = true }
                 XTab.SEARCH -> ExpertSearch(docs, vm.aiCategories, vm::organize, vm::moveToTrash, vm::deletePermanently, vm::correctCategory)
                 XTab.SETTINGS -> ExpertSettings(vm, fullAccess, isPro, price, requestAccess, { folderPicker.launch(null) }, { showPro = true }, restorePro)

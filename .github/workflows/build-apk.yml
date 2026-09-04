@@ -3,7 +3,7 @@ name: Build RangIA 1.0
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, rangia-v4-expert ]
     paths:
       - 'app/**'
       - 'build.gradle.kts'
@@ -34,6 +34,9 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
+
+      - name: Run classifier regression tests
+        run: gradle :app:testDebugUnitTest --stacktrace
 
       - name: Build debug APK and release bundle
         run: gradle clean :app:assembleDebug :app:bundleRelease --stacktrace

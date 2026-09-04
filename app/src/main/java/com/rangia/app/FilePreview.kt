@@ -14,11 +14,14 @@ import java.io.InputStream
 import kotlin.math.max
 
 object FilePreviewLoader {
-    fun load(context: Context, doc: IndexedDocument, targetPx: Int = 220): Bitmap? = runCatching {
+    fun load(context: Context, doc: IndexedDocument, targetPx: Int = 220): Bitmap? =
+        load(context, doc.contentUri, doc.mimeType, doc.originalName, targetPx)
+
+    fun load(context: Context, uri: Uri, mimeType: String, fileName: String, targetPx: Int = 220): Bitmap? = runCatching {
         when {
-            doc.mimeType.startsWith("image/") -> loadImage(context, doc.contentUri, targetPx)
-            doc.mimeType.startsWith("video/") -> loadVideo(context, doc.contentUri)
-            doc.mimeType == "application/pdf" || doc.originalName.endsWith(".pdf", true) -> loadPdf(context, doc.contentUri, targetPx)
+            mimeType.startsWith("image/") -> loadImage(context, uri, targetPx)
+            mimeType.startsWith("video/") -> loadVideo(context, uri)
+            mimeType == "application/pdf" || fileName.endsWith(".pdf", true) -> loadPdf(context, uri, targetPx)
             else -> null
         }
     }.getOrNull()
